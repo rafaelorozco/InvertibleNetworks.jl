@@ -49,6 +49,8 @@ struct ActNorm <: NeuralNetLayer
     backward::Function
 end
 
+@Flux.functor ActNorm
+
 # Constructor: Initialize with nothing
 function ActNorm(k; logdet=false)
     s = Parameter(nothing)
