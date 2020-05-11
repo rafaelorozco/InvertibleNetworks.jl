@@ -43,4 +43,17 @@ end
 
 abstract type NeuralNetLayer end
 
+function Base.getproperty(obj::NeuralNetLayer, sym::Symbol)
+    if sym == :forward
+        return (args...) -> forward(args..., obj)
+    elseif sym == :inverse
+        return (args...) -> inverse(args..., obj)
+    elseif sym == :backward
+        return (args...) -> backward(args..., obj)
+    else
+         # fallback to getfield
+        return getfield(obj, sym)
+    end
+end
+
 abstract type InvertibleNetwork end

@@ -54,9 +54,7 @@ struct CouplingLayerHINT <: NeuralNetLayer
     CL::AbstractArray{CouplingLayerBasic, 1}
     C::Union{Conv1x1, Nothing}
     logdet::Bool
-    forward::Function
-    inverse::Function
-    backward::Function
+    permute
 end
 
 @Flux.functor CouplingLayerHINT
@@ -93,11 +91,7 @@ function CouplingLayerHINT(nx::Int64, ny::Int64, n_in::Int64, n_hidden::Int64, b
         C = nothing
     end
 
-    return CouplingLayerHINT(CL, C, logdet,
-        X -> forward_hint(X, CL, C; logdet=logdet, permute=permute),
-        Y -> inverse_hint(Y, CL, C, permute=permute),
-        (ΔY, Y) -> backward_hint(ΔY, Y, CL, C, permute=permute)
-        )
+    return CouplingLayerHINT(CL, C, logdet, permute)
 end
 
 # 3D Constructor from input dimensions
@@ -121,52 +115,48 @@ function CouplingLayerHINT(nx::Int64, ny::Int64, nz::Int64, n_in::Int64, n_hidde
         C = nothing
     end
 
-    return CouplingLayerHINT(CL, C, logdet,
-        X -> forward_hint(X, CL, C; logdet=logdet, permute=permute),
-        Y -> inverse_hint(Y, CL, C, permute=permute),
-        (ΔY, Y) -> backward_hint(ΔY, Y, CL, C, permute=permute)
-        )
+    return CouplingLayerHINT(CL, C, logdet, permute)
 end
 
 # Input is tensor X
-function forward_hint(X, CL, C; scale=1, logdet=false, permute="none")
-    if permute == "full" || permute == "both"
-        X = C.forward(X)
+function forward(X, H::CouplingLayerHINT; scale=1)
+    if H.permute == "full" || H.permute == "both"
+        X = H.C.forward(X)
     end
     Xa, Xb = tensor_split(X)
-    permute == "lower" && (Xb = C.forward(Xb))
+    H.permute == "lower" && (Xb = H.C.forward(Xb))
 
     recursive = false
-    if typeof(X) == Array{Float32, 4} && size(X, 3) > 4
+    if typeof(X) <: AbstractArray{Float32, 4} && size(X, 3) > 4
         recursive = true
-    elseif typeof(X) == Array{Float32, 5} && size(X, 4) > 4
+    elseif typeof(X) <: AbstractArray{Float32, 5} && size(X, 4) > 4
         recursive = true
     end
     
     if recursive
         # Call function recursively
-        Ya, logdet1 = forward_hint(Xa, CL, C; scale=scale+1, logdet=logdet)
-        Y_temp, logdet2 = forward_hint(Xb, CL, C; scale=scale+1, logdet=logdet)
-        if logdet==false
-            Yb = CL[scale].forward(Xa, Y_temp)[2]
+        Ya, logdet1 = forward(Xa, H; scale=scale+1)
+        Y_temp, logdet2 = forward(Xb, H; scale=scale+1)
+        if H.logdet == false
+            Yb = H.CL[scale].forward(Xa, Y_temp)[2]
             logdet3 = 0f0
         else
-            Yb, logdet3 = CL[scale].forward(Xa, Y_temp)[[2,3]]
+            Yb, logdet3 = H.CL[scale].forward(Xa, Y_temp)[[2,3]]
         end
         logdet_full = logdet1 + logdet2 + logdet3
     else
         # Finest layer
         Ya = copy(Xa)
         if logdet==false
-            Yb = CL[scale].forward(Xa, Xb)[2]
+            Yb = H.CL[scale].forward(Xa, Xb)[2]
             logdet_full = 0f0
         else
-            Yb, logdet_full = CL[scale].forward(Xa, Xb)[[2,3]]
+            Yb, logdet_full = H.CL[scale].forward(Xa, Xb)[[2,3]]
         end
     end
     Y = tensor_cat(Ya, Yb)
-    permute == "both" && (Y = C.inverse(Y))
-    if scale==1 && logdet==false
+    H.permute == "both" && (Y = H.C.inverse(Y))
+    if scale==1 && H.logdet==false
         return Y
     else
         return Y, logdet_full
@@ -174,57 +164,57 @@ function forward_hint(X, CL, C; scale=1, logdet=false, permute="none")
 end
 
 # Input is tensor Y
-function inverse_hint(Y, CL, C; scale=1, permute="none")
-    permute == "both" && (Y = C.forward(Y))
+function inverse(Y, H::CouplingLayerHINT; scale=1)
+    H.permute == "both" && (Y = H.C.forward(Y))
     Ya, Yb = tensor_split(Y)
     recursive = false
-    if typeof(Y) == Array{Float32, 4} && size(Y, 3) > 4
+    if typeof(Y) <: AbstractArray{Float32, 4} && size(Y, 3) > 4
         recursive = true
-    elseif typeof(Y) == Array{Float32, 5} && size(Y, 4) > 4
+    elseif typeof(Y) <: AbstractArray{Float32, 5} && size(Y, 4) > 4
         recursive = true
     end
     if recursive
-        Xa = inverse_hint(Ya, CL, C; scale=scale+1)
-        Xb = inverse_hint(CL[scale].inverse(Xa, Yb)[2], CL, C; scale=scale+1)
+        Xa = inverse(Ya, H; scale=scale+1)
+        Xb = inverse(H.CL[scale].inverse(Xa, Yb)[2], H; scale=scale+1)
     else
         Xa = copy(Ya)
-        Xb = CL[scale].inverse(Ya, Yb)[2]
+        Xb = H.CL[scale].inverse(Ya, Yb)[2]
     end
-    permute == "lower" && (Xb = C.inverse(Xb))
+    H.permute == "lower" && (Xb = H.C.inverse(Xb))
     X = tensor_cat(Xa, Xb)
-    if permute == "full" || permute == "both"
-        X = C.inverse(X)
+    if H.permute == "full" || H.permute == "both"
+        X = H.C.inverse(X)
     end
     return X
 end
 
 # Input are two tensors ΔY, Y
-function backward_hint(ΔY, Y, CL, C; scale=1, permute="none")
-    permute == "both" && (print("hello"); (ΔY, Y) = C.forward((ΔY, Y)))
+function backward(ΔY, Y, H::CouplingLayerHINT; scale=1)
+    H.permute == "both" && ((ΔY, Y) = H.C.forward((ΔY, Y)))
     Ya, Yb = tensor_split(Y)
     ΔYa, ΔYb = tensor_split(ΔY)
     recursive = false
-    if typeof(Y) == Array{Float32, 4} && size(Y, 3) > 4
+    if typeof(Y) <: AbstractArray{Float32, 4} && size(Y, 3) > 4
         recursive = true
-    elseif typeof(Y) == Array{Float32, 5} && size(Y, 4) > 4
+    elseif typeof(Y) <: AbstractArray{Float32, 5} && size(Y, 4) > 4
         recursive = true
     end
     if recursive
-        ΔXa, Xa = backward_hint(ΔYa, Ya, CL, C; scale=scale+1)
-        ΔXa_temp, ΔXb_temp, X_temp = CL[scale].backward(ΔXa.*0f0, ΔYb, Xa, Yb)[[1,2,4]]
-        ΔXb, Xb = backward_hint(ΔXb_temp, X_temp, CL, C; scale=scale+1)
+        ΔXa, Xa = backward(ΔYa, Ya, H; scale=scale+1)
+        ΔXa_temp, ΔXb_temp, X_temp = H.CL[scale].backward(ΔXa.*0f0, ΔYb, Xa, Yb)[[1,2,4]]
+        ΔXb, Xb = backward(ΔXb_temp, X_temp, H; scale=scale+1)
         ΔXa += ΔXa_temp
     else
         Xa = copy(Ya)
         ΔXa = copy(ΔYa)
-        ΔXa_, ΔXb, Xb = CL[scale].backward(ΔYa.*0f0, ΔYb, Ya, Yb)[[1,2,4]]
+        ΔXa_, ΔXb, Xb = H.CL[scale].backward(ΔYa.*0f0, ΔYb, Ya, Yb)[[1,2,4]]
         ΔXa += ΔXa_
     end
-    permute == "lower" && ((ΔXb, Xb) = C.inverse((ΔXb, Xb)))
+    H.permute == "lower" && ((ΔXb, Xb) = H.C.inverse((ΔXb, Xb)))
     ΔX = tensor_cat(ΔXa, ΔXb)
     X = tensor_cat(Xa, Xb)
-    if permute == "full" || permute == "both"
-        print("hi"); (ΔX, X) = C.inverse((ΔX, X))
+    if H.permute == "full" || H.permute == "both"
+        (ΔX, X) = H.C.inverse((ΔX, X))
     end
     return ΔX, X
 end
